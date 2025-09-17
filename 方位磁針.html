@@ -1,0 +1,142 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <style>
+    body { display:flex; height:100vh; align-items:center; justify-content:center; background:#111; color:#fff; font-family:system-ui;}
+    #compass { width:160px; height:160px; position:relative; }
+    #arrow { width:0; height:0; border-left:12px solid transparent; border-right:12px solid transparent;
+             border-bottom:40px solid red; position:absolute; left:50%; top:10%; transform-origin:50% 85%; 
+             transform:translateX(-50%) rotate(0deg); }
+    #info { position:fixed; bottom:10px; left:10px; font-size:13px; }
+    button { margin:6px; padding:8px 12px; }
+  </style>
+</head>
+<body>
+  <div>
+    <div id="compass"><div id="arrow"></div></div>
+    <div>
+      <button id="startBtn">Start（位置・向き許可）</button>
+    </div>
+  </div>
+  <div id="info"></div>
+
+<script>
+/* --- ユーティリティ --- */
+const toRad = d => d * Math.PI/180;
+const toDeg = r => r * 180/Math.PI;
+
+/* 方位（bearing）を計算（現在位置 -> 目的地） */
+function bearing(lat1, lon1, lat2, lon2) {
+  const φ1 = toRad(lat1), φ2 = toRad(lat2);
+  const Δλ = toRad(lon2 - lon1);
+  const y = Math.sin(Δλ) * Math.cos(φ2);
+  const x = Math.cos(φ1)*Math.sin(φ2) - Math.sin(φ1)*Math.cos(φ2)*Math.cos(Δλ);
+  const θ = Math.atan2(y, x);
+  return (toDeg(θ) + 360) % 360;
+}
+
+/* 角度の平滑化（循環を考慮） */
+function smoothAngle(prev, current, alpha=0.25) {
+  if (prev == null) return current;
+  let diff = ((current - prev + 540) % 360) - 180; // -180..180
+  return (prev + alpha * diff + 360) % 360;
+}
+
+/* DeviceOrientation から方位を取り出す（汎用的な近似） */
+function headingFromDeviceEvent(e) {
+  if (typeof e.webkitCompassHeading === 'number') {
+    return e.webkitCompassHeading; // iOS
+  }
+  if (typeof e.alpha === 'number') {
+    // screen orientation 補正（簡易）
+    const screenAngle = (screen.orientation && screen.orientation.angle) || window.orientation || 0;
+    // alpha は Z 軸回りの角度（端末/ブラウザ実装差あり）。実装により補正が必要な場合あり。
+    return (e.alpha - screenAngle + 360) % 360;
+  }
+  return null;
+}
+
+/* --- メイン --- */
+const arrow = document.getElementById('arrow');
+const info = document.getElementById('info');
+const startBtn = document.getElementById('startBtn');
+
+/* 目的地（例）*/
+const target = { lat: 35.69254491366769, lon: 140.05087612791596 }; // 東京駅など、好きな座標に変えてください
+
+let lastHeading = null;
+let lastSmoothedHeading = null;
+let lastPosition = null;
+let watchId = null;
+
+/* 向きイベントハンドラ */
+function handleOrientation(e) {
+  const rawHeading = headingFromDeviceEvent(e);
+  if (rawHeading == null) return;
+  lastHeading = rawHeading;
+  lastSmoothedHeading = smoothAngle(lastSmoothedHeading, rawHeading, 0.2);
+  updateUI();
+}
+
+/* 位置更新ハンドラ */
+function handlePosition(pos) {
+  const { latitude: lat, longitude: lon } = pos.coords;
+  lastPosition = { lat, lon, accuracy: pos.coords.accuracy, heading: pos.coords.heading };
+  updateUI();
+}
+
+/* UI 更新（矢印回転） */
+function updateUI() {
+  if (!lastPosition || lastSmoothedHeading == null) {
+    info.textContent = 'Waiting for sensors...';
+    return;
+  }
+  const targetBearing = bearing(lastPosition.lat, lastPosition.lon, target.lat, target.lon);
+  // 矢印は「端末の向いている方向を0度とした時、画面上で目的地がどの角度にあるか」を回す
+  const relative = ((targetBearing - lastSmoothedHeading + 540) % 360) - 180; // -180..180
+  arrow.style.transform = `translateX(-50%) rotate(${relative}deg)`;
+  info.innerHTML = `
+    pos: ${lastPosition.lat.toFixed(6)}, ${lastPosition.lon.toFixed(6)} (±${Math.round(lastPosition.accuracy)}m)<br>
+    target bearing: ${targetBearing.toFixed(1)}°<br>
+    device heading: ${lastSmoothedHeading.toFixed(1)}°<br>
+    relative: ${relative.toFixed(1)}°
+  `;
+}
+
+/* iOS の向き許可要求（ユーザー操作必須）*/
+async function requestOrientationPermissionIfNeeded() {
+  if (typeof DeviceOrientationEvent !== 'undefined' &&
+      typeof DeviceOrientationEvent.requestPermission === 'function') {
+    try {
+      const res = await DeviceOrientationEvent.requestPermission(); // must be called on user gesture
+      if (res !== 'granted') throw new Error('permission denied');
+    } catch (err) {
+      alert('Motion permission denied or not available.');
+      throw err;
+    }
+  }
+}
+
+/* スタート */
+startBtn.addEventListener('click', async () => {
+  startBtn.disabled = true;
+  try {
+    await requestOrientationPermissionIfNeeded();
+    window.addEventListener('deviceorientation', handleOrientation, true);
+  } catch (e) {
+    console.warn('orientation permission failed', e);
+  }
+
+  if ('geolocation' in navigator) {
+    watchId = navigator.geolocation.watchPosition(handlePosition, (err)=> {
+      console.error(err); info.textContent = 'Geolocation error: ' + err.message;
+    }, { enableHighAccuracy: true, maximumAge: 0, timeout: 10000 });
+  } else {
+    alert('Geolocation not supported');
+  }
+});
+</script>
+</body>
+</html>
